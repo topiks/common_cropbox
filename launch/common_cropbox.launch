@@ -1,0 +1,8 @@
+<launch>
+    <node pkg="common_cropbox" type="cropbox_routine" name="common_cropbox" output="screen">
+        <param name="topic_laser_input" value="scan"/>
+        <param name="topic_pcl_output" value="scan_cropbox"/>
+        <param name="laser_frame_name" value="base_link"/>
+        <rosparam command="load" file="$(find common_cropbox)/params/common_cropbox.yaml"/>
+    </node>
+</launch>
