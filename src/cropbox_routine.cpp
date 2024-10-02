@@ -6,6 +6,10 @@
 #include "laser_geometry/laser_geometry.h"
 #include <jsk_recognition_msgs/BoundingBox.h>
 #include <common_cropbox/CropboxConfig.h>
+#include <dynamic_reconfigure/Reconfigure.h>
+#include <dynamic_reconfigure/Config.h>
+#include <dynamic_reconfigure/DoubleParameter.h>
+#include <thread>
 
 #include <pcl/point_cloud.h>
 #include <pcl/conversions.h>
@@ -23,6 +27,7 @@ void cllbck_tim_10_hz(const ros::TimerEvent& event);
 void cllbck_laser_input(const sensor_msgs::LaserScan::ConstPtr& msg);
 void update_bounding_cropbox(double x_min, double x_max, double y_min, double y_max, double z_min, double z_max);
 void cropbox_callback(common_cropbox::CropboxConfig &config, uint32_t level);
+void update_yaml_file();
 
 // ------------------------------------------------------
 
@@ -33,6 +38,8 @@ ros::Subscriber sub_laser_input;
 ros::Publisher pub_pcl_output;
 ros::Publisher pub_cropbox_params;
 
+ros::ServiceClient update_cropbox_value_srv;
+
 dynamic_reconfigure::Server<common_cropbox::CropboxConfig> *cropbox_reconfigure_server;
 dynamic_reconfigure::Server<common_cropbox::CropboxConfig>::CallbackType cropbox_reconfigure_callback_f;
 
@@ -40,8 +47,11 @@ std::string topic_laser_input;
 std::string topic_pcl_output;
 std::string topic_pcl_output_bounding_box;
 std::string laser_frame_name;
+std::string yaml_file_path;
+std::string service_rqt_reconfigure_name;
 
 double cropbox_value[6];
+double prev_cropbox_value[6];
 
 laser_geometry::LaserProjection projector;
 
@@ -51,6 +61,7 @@ PointCloud::Ptr cloud_original(new PointCloud);
 PointCloud::Ptr cloud_cropbox(new PointCloud);
 
 bool already_init = false;
+bool yaml_updated = false;
 
 // ======================================================
 // ------------------------------------------------------
@@ -71,8 +82,11 @@ int main(int argc, char **argv)
         topic_pcl_output = "/laser_output_common_cropbox";
     if(!NH_private.getParam("laser_frame_name", laser_frame_name))
         laser_frame_name = "base_link";
+    if(!NH_private.getParam("yaml_file_path", yaml_file_path))
+        yaml_file_path = "";
 
     topic_pcl_output_bounding_box = topic_pcl_output + "_bounding_box";
+    service_rqt_reconfigure_name = "/" + topic_pcl_output_bounding_box + "/set_parameters";
     
     NH_private.getParam("x_min", cropbox_value[0]);
     NH_private.getParam("x_max", cropbox_value[1]);
@@ -80,6 +94,9 @@ int main(int argc, char **argv)
     NH_private.getParam("y_max", cropbox_value[3]);
     NH_private.getParam("z_min", cropbox_value[4]);
     NH_private.getParam("z_max", cropbox_value[5]);
+
+    for(int i = 0; i < 6; i++)
+        prev_cropbox_value[i] = cropbox_value[i];
     
     // --------------
 
@@ -87,6 +104,8 @@ int main(int argc, char **argv)
 
     pub_pcl_output = NH.advertise<sensor_msgs::PointCloud2>(topic_pcl_output, 1);
     pub_cropbox_params = NH.advertise<jsk_recognition_msgs::BoundingBox>(topic_pcl_output_bounding_box, 1);
+
+    update_cropbox_value_srv = NH.serviceClient<dynamic_reconfigure::Reconfigure>(service_rqt_reconfigure_name);
 
     tim_10_hz = NH.createTimer(ros::Duration(0.1), cllbck_tim_10_hz);
 
@@ -163,6 +182,9 @@ void cropbox_callback(common_cropbox::CropboxConfig &config, uint32_t level)
 {
     if(already_init)
     {
+        for(int i = 0; i < 6; i++)
+            prev_cropbox_value[i] = cropbox_value[i];
+
         cropbox_value[0] = config.x_min;
         cropbox_value[1] = config.x_max;
         cropbox_value[2] = config.y_min;
@@ -174,7 +196,73 @@ void cropbox_callback(common_cropbox::CropboxConfig &config, uint32_t level)
 
 // ------------------------------------------------------
 
+void update_yaml_file()
+{
+    if( prev_cropbox_value[0] != cropbox_value[0] || 
+        prev_cropbox_value[1] != cropbox_value[1] || 
+        prev_cropbox_value[2] != cropbox_value[2] || 
+        prev_cropbox_value[3] != cropbox_value[3] || 
+        prev_cropbox_value[4] != cropbox_value[4] || 
+        prev_cropbox_value[5] != cropbox_value[5]
+    )
+    {
+        if(yaml_file_path == "")
+        {
+            std::cout << "No yaml file path specified. Skipping yaml file update." << std::endl;
+            return;
+        }
+
+        std::ofstream yaml_file;
+        yaml_file.open(yaml_file_path.c_str());
+        yaml_file << "x_min: " << cropbox_value[0] << std::endl;
+        yaml_file << "x_max: " << cropbox_value[1] << std::endl;
+        yaml_file << "y_min: " << cropbox_value[2] << std::endl;
+        yaml_file << "y_max: " << cropbox_value[3] << std::endl;
+        yaml_file << "z_min: " << cropbox_value[4] << std::endl;
+        yaml_file << "z_max: " << cropbox_value[5] << std::endl;
+        yaml_file.close();
+    }
+}
+
+// ------------------------------------------------------
+
 void cllbck_tim_10_hz(const ros::TimerEvent& event)
 {
     update_bounding_cropbox(cropbox_value[0], cropbox_value[1], cropbox_value[2], cropbox_value[3], cropbox_value[4], cropbox_value[5]);
+    update_yaml_file();
+
+    if (!yaml_updated)
+    {
+        if (ros::service::waitForService(service_rqt_reconfigure_name, ros::Duration(5.0)))
+        {
+            std::thread update_thread([&]() 
+            {
+                dynamic_reconfigure::Reconfigure srv;
+                dynamic_reconfigure::DoubleParameter double_param;
+                dynamic_reconfigure::Config conf;
+
+                const std::string names[] = {"x_min", "x_max", "y_min", "y_max", "z_min", "z_max"};
+
+                for (int i = 0; i < 6; ++i) 
+                {
+                    double_param.name = names[i];
+                    double_param.value = cropbox_value[i];
+                    conf.doubles.push_back(double_param);
+                }
+
+                srv.request.config = conf;
+
+                if (update_cropbox_value_srv.call(srv)) 
+                    yaml_updated = true; 
+                else
+                    std::cout << "Failed to update YAML file." << std::endl;
+            });
+
+            update_thread.detach();
+        }
+        else
+        {
+            std::cout << "Service " << service_rqt_reconfigure_name << " not available." << std::endl;
+        }
+    }
 }

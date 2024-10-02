@@ -1,9 +1,11 @@
 <launch>
+    <arg name="yaml_file_path" default="$(find common_cropbox)/params/common_cropbox.yaml"/>
     <node pkg="common_cropbox" type="cropbox_routine" name="common_cropbox" output="screen">
         <param name="topic_laser_input" value="scan"/>
         <param name="topic_pcl_output" value="scan_cropbox"/>
         <param name="laser_frame_name" value="base_link"/>
-        <rosparam command="load" file="$(find common_cropbox)/params/common_cropbox.yaml"/>
+        <param name="yaml_file_path" value="$(arg yaml_file_path)"/>
+        <rosparam command="load" file="$(arg yaml_file_path)"/>
     </node>
 
     <!-- <node pkg="pointcloud_to_laserscan" type="pointcloud_to_laserscan_node" name="pointcloud_to_laserscan_common_cropbox">
