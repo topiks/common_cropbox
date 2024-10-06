@@ -10,6 +10,7 @@
 #include <dynamic_reconfigure/Config.h>
 #include <dynamic_reconfigure/DoubleParameter.h>
 #include <thread>
+#include "std_msgs/Bool.h"
 
 #include <pcl/point_cloud.h>
 #include <pcl/conversions.h>
@@ -25,6 +26,7 @@
 int cropbox_routine_init();
 void cllbck_tim_10_hz(const ros::TimerEvent& event);
 void cllbck_laser_input(const sensor_msgs::LaserScan::ConstPtr& msg);
+void cllbck_pcl_input(const sensor_msgs::PointCloud2::ConstPtr& msg);
 void update_bounding_cropbox(double x_min, double x_max, double y_min, double y_max, double z_min, double z_max);
 void cropbox_callback(common_cropbox::CropboxConfig &config, uint32_t level);
 void update_yaml_file();
@@ -37,6 +39,7 @@ ros::Subscriber sub_laser_input;
 
 ros::Publisher pub_pcl_output;
 ros::Publisher pub_cropbox_params;
+ros::Publisher pub_box_contain_points;
 
 ros::ServiceClient update_cropbox_value_srv;
 
@@ -44,11 +47,15 @@ dynamic_reconfigure::Server<common_cropbox::CropboxConfig> *cropbox_reconfigure_
 dynamic_reconfigure::Server<common_cropbox::CropboxConfig>::CallbackType cropbox_reconfigure_callback_f;
 
 std::string topic_laser_input;
+std::string topic_pcl_input;
 std::string topic_pcl_output;
 std::string topic_pcl_output_bounding_box;
+std::string topic_box_contain_points;
 std::string laser_frame_name;
 std::string yaml_file_path;
 std::string service_rqt_reconfigure_name;
+std::string type_input;
+int minimum_points_number;
 
 double cropbox_value[6];
 double prev_cropbox_value[6];
@@ -78,12 +85,21 @@ int main(int argc, char **argv)
 
     if(!NH_private.getParam("topic_laser_input", topic_laser_input))
         topic_laser_input = "/laser_input_common_cropbox";
+    if(!NH_private.getParam("topic_pcl_input", topic_pcl_input))
+        topic_pcl_input = "/pcl_input_common_cropbox";
     if(!NH_private.getParam("topic_pcl_output", topic_pcl_output))
         topic_pcl_output = "/laser_output_common_cropbox";
+    if(!NH_private.getParam("topic_box_contain_points", topic_box_contain_points))
+        topic_box_contain_points = "/box_contain_points";
+    if(!NH_private.getParam("minimum_points_number", minimum_points_number))
+        minimum_points_number = 1;
     if(!NH_private.getParam("laser_frame_name", laser_frame_name))
         laser_frame_name = "base_link";
     if(!NH_private.getParam("yaml_file_path", yaml_file_path))
         yaml_file_path = "";
+
+
+    NH_private.getParam("type_input", type_input);
 
     topic_pcl_output_bounding_box = topic_pcl_output + "_bounding_box";
     service_rqt_reconfigure_name = "/" + topic_pcl_output_bounding_box + "/set_parameters";
@@ -100,10 +116,19 @@ int main(int argc, char **argv)
     
     // --------------
 
-    sub_laser_input = NH.subscribe(topic_laser_input, 1, cllbck_laser_input);
+    if(type_input == "laser")
+        sub_laser_input = NH.subscribe(topic_laser_input, 1, cllbck_laser_input);
+    else if(type_input == "pcl")
+        sub_laser_input = NH.subscribe(topic_pcl_input, 1, cllbck_pcl_input);
+    else
+    {
+        std::cout << "Invalid input type. Please specify 'laser' or 'pcl'." << std::endl;
+        ros::shutdown();
+    }
 
     pub_pcl_output = NH.advertise<sensor_msgs::PointCloud2>(topic_pcl_output, 1);
     pub_cropbox_params = NH.advertise<jsk_recognition_msgs::BoundingBox>(topic_pcl_output_bounding_box, 1);
+    pub_box_contain_points = NH.advertise<std_msgs::Bool>(topic_box_contain_points, 1);
 
     update_cropbox_value_srv = NH.serviceClient<dynamic_reconfigure::Reconfigure>(service_rqt_reconfigure_name);
 
@@ -140,7 +165,51 @@ void cllbck_laser_input(const sensor_msgs::LaserScan::ConstPtr& msg)
     sensor_msgs::PointCloud2 output;
     pcl::toROSMsg(*cloud_cropbox, output);
     output.header.frame_id = laser_frame_name;
-    pub_pcl_output.publish(output);
+
+    // --------------
+
+    bool box_contains_points = false;
+    if(cloud_cropbox->points.size() >= minimum_points_number)
+        box_contains_points = true;
+
+    std_msgs::Bool msg_box_contains_points;
+    msg_box_contains_points.data = box_contains_points;
+    pub_box_contain_points.publish(msg_box_contains_points);
+
+    if(box_contains_points)
+        pub_pcl_output.publish(output);
+}
+
+// ------------------------------------------------------
+
+void cllbck_pcl_input(const sensor_msgs::PointCloud2::ConstPtr& msg)
+{
+    pcl::PCLPointCloud2 pcl_pc2;
+    pcl_conversions::toPCL(*msg, pcl_pc2);
+    pcl::fromPCLPointCloud2(pcl_pc2, *cloud_original);
+
+    pcl::CropBox<PointT> cropbox_filter;
+    cropbox_filter.setInputCloud(cloud_original);
+    cropbox_filter.setMin(Eigen::Vector4f(cropbox_value[0], cropbox_value[2], cropbox_value[4], 1.0));
+    cropbox_filter.setMax(Eigen::Vector4f(cropbox_value[1], cropbox_value[3], cropbox_value[5], 1.0));
+    cropbox_filter.filter(*cloud_cropbox);
+
+    sensor_msgs::PointCloud2 output;
+    pcl::toROSMsg(*cloud_cropbox, output);
+    output.header.frame_id = laser_frame_name;
+
+    // --------------
+
+    bool box_contains_points = false;
+    if(cloud_cropbox->points.size() >= minimum_points_number)
+        box_contains_points = true;
+
+    std_msgs::Bool msg_box_contains_points;
+    msg_box_contains_points.data = box_contains_points;
+    pub_box_contain_points.publish(msg_box_contains_points);
+
+    if(box_contains_points)
+        pub_pcl_output.publish(output);
 }
 
 // ------------------------------------------------------
